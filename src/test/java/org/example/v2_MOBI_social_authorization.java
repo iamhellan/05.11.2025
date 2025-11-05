@@ -2,177 +2,235 @@ package org.example;
 
 import com.microsoft.playwright.*;
 import com.microsoft.playwright.options.WaitForSelectorState;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-
-import java.util.Arrays;
+import org.junit.jupiter.api.*;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class v2_MOBI_social_authorization {
     static Playwright playwright;
     static Browser browser;
-    static BrowserContext mobiContext;
-    static BrowserContext chromeContext;
+    static BrowserContext context;
+    static Page page;
+    static Properties creds = new Properties();
 
     @BeforeAll
-    static void setup() {
+    static void setUpAll() throws IOException {
+        // --- Загружаем креды ---
+        creds.load(new FileInputStream("src/test/resources/config.properties"));
+
         playwright = Playwright.create();
         browser = playwright.chromium().launch(
                 new BrowserType.LaunchOptions()
                         .setHeadless(false)
-                        .setArgs(Arrays.asList(new String[]{
-                                "--start-maximized",
-                                "--disable-blink-features=AutomationControlled"
-                        }))
+                        .setArgs(List.of("--start-maximized", "--disable-blink-features=AutomationControlled"))
         );
 
-        // Мобильный контекст для 1xbet
-        mobiContext = browser.newContext(
+        context = browser.newContext(
                 new Browser.NewContextOptions()
                         .setViewportSize(null)
-                        .setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) " +
-                                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15A372 Safari/604.1")
         );
+        page = context.newPage();
 
-        // Десктопный Chrome-контекст для Google Messages
-        chromeContext = browser.newContext(
-                new Browser.NewContextOptions()
-                        .setViewportSize(null)
-                        .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        );
+        // --- Проверяем сессию Google Messages ---
+        Path sessionPath = Paths.get("src/test/resources/sessions/messages-session.json");
+        try {
+            BrowserContext messagesContext = browser.newContext(
+                    new Browser.NewContextOptions().setStorageStatePath(sessionPath)
+            );
+            messagesContext.close();
+            System.out.println("✅ Сессия Google Messages успешно загружена.");
+        } catch (Exception e) {
+            System.out.println("⚠️ Не удалось загрузить сохранённую сессию Google Messages. Проверь файл: " + sessionPath);
+        }
     }
 
     @AfterAll
-    static void teardown() {
-        // mobiContext.close();
-        // chromeContext.close();
-        // browser.close();
-        // playwright.close();
+    static void tearDownAll() {
+        System.out.println("Тест завершён ✅ (браузер остаётся открытым)");
     }
 
     @Test
     void socialGoogleAuthMobile() {
-        Page page = mobiContext.newPage();
+        long start = System.currentTimeMillis();
+        String botToken = creds.getProperty("telegram.bot.token");
+        String chatId = creds.getProperty("telegram.chat.id");
 
-        System.out.println("Открываем мобильную версию сайта...");
+        Telegram.send("🚀 *Тест v2_MOBI_social_authorization* стартовал\n(вход через Google + SMS)", botToken, chatId);
+
+        String email = creds.getProperty("google.email");
+        String password = creds.getProperty("google.password");
+
+        // --- Открываем сайт ---
+        System.out.println("Открываем мобильную версию сайта 1xbet.kz");
         page.navigate("https://1xbet.kz/?platform_type=mobile");
 
-        System.out.println("Жмём 'Войти'...");
+        // --- Социальная авторизация ---
+        System.out.println("Жмём 'Войти'");
         page.click("button#curLoginForm");
 
         System.out.println("Выбираем Google...");
         page.click("li.auth-social__item .auth-social__link--google");
 
-        // --- ОЖИДАНИЕ ПОПАПА GOOGLE ---
-        System.out.println("Ждём окно Google...");
+        // --- Ожидание попапа ---
+        System.out.println("Ждём окно авторизации Google...");
         Page popup = page.waitForPopup(() -> {});
         popup.waitForLoadState();
 
         System.out.println("Вводим email...");
-        popup.fill("input[type='email']", "mynameisjante@gmail.com");
+        popup.fill("input[type='email']", email);
         popup.click("button:has-text('Далее')");
         popup.waitForTimeout(2000);
 
         System.out.println("Вводим пароль...");
-        popup.fill("input[type='password']", "Hesoyam11+");
+        popup.fill("input[type='password']", password);
         popup.click("button:has-text('Далее')");
+
         popup.waitForClose(() -> {});
+        System.out.println("Окно Google закрыто, возвращаемся на сайт.");
 
-        // --- ЖМЁМ ВЫСЛАТЬ КОД ---
-        System.out.println("Жмём 'Выслать код'...");
-        Locator sendCodeButton = page.locator("button:has-text('Выслать код')");
-        sendCodeButton.waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE));
+        // ---- ЖДЁМ КАПЧУ И КНОПКУ "ВЫСЛАТЬ КОД" ----
+        System.out.println("Теперь решай капчу вручную — я жду кнопку 'Выслать код' (до 10 минут)");
         try {
-            sendCodeButton.click();
-            System.out.println("Кнопка 'Выслать код' нажата ✅");
-        } catch (Exception e) {
-            System.out.println("Первая попытка клика не удалась, пробуем через JS...");
-            page.evaluate("document.querySelector(\"button:has-text('Выслать код')\")?.click()");
-        }
-
-        // --- ЖДЁМ РЕШЕНИЯ КАПЧИ ---
-        System.out.println("Теперь решай капчу вручную — я жду поле для кода (до 10 минут)...");
-        try {
-            page.waitForSelector("input.phone-sms-modal-code__input",
+            page.waitForSelector("button:has-text('Выслать код')",
                     new Page.WaitForSelectorOptions()
                             .setTimeout(600_000)
                             .setState(WaitForSelectorState.VISIBLE)
             );
-            System.out.println("Поле для кода появилось! Достаём код из Google Messages...");
+            System.out.println("Кнопка 'Выслать код' появилась ✅");
         } catch (PlaywrightException e) {
-            throw new RuntimeException("Поле для ввода кода не появилось — капча не решена или что-то пошло не так!");
+            throw new RuntimeException("❌ Кнопка 'Выслать код' не появилась — капча не решена!");
         }
 
-        // --- ОТКРЫВАЕМ GOOGLE MESSAGES В ДЕСКТОПНОМ КОНТЕКСТЕ, ВЫТАСКИВАЕМ КОД ---
-        Page messagesPage = chromeContext.newPage();
+        System.out.println("Жмём 'Выслать код'");
+        page.click("button:has-text('Выслать код')");
+
+        System.out.println("Ждём поле ввода кода...");
+        page.waitForSelector("input.phone-sms-modal-code__input",
+                new Page.WaitForSelectorOptions()
+                        .setTimeout(600_000)
+                        .setState(WaitForSelectorState.VISIBLE)
+        );
+        System.out.println("Поле для кода появилось ✅");
+
+        // --- Google Messages ---
+        Path projectRoot = Paths.get(System.getProperty("user.dir"));
+        Path[] possiblePaths = new Path[]{
+                projectRoot.resolve("resources/sessions/messages-session.json"),
+                projectRoot.resolve("src/test/resources/sessions/messages-session.json"),
+                projectRoot.resolve("src/test/java/org/example/resources/sessions/messages-session.json")
+        };
+
+        Path sessionPath = null;
+        for (Path p : possiblePaths) {
+            if (p.toFile().exists()) {
+                sessionPath = p;
+                break;
+            }
+        }
+        if (sessionPath == null)
+            throw new RuntimeException("❌ Файл сессии Google Messages не найден!");
+
+        System.out.println("📁 Используем сессию: " + sessionPath.toAbsolutePath());
+
+        System.out.println("🔐 Открываем Google Messages...");
+        BrowserContext messagesContext = browser.newContext(
+                new Browser.NewContextOptions().setStorageStatePath(sessionPath)
+        );
+        Page messagesPage = messagesContext.newPage();
         messagesPage.navigate("https://messages.google.com/web/conversations");
 
-        System.out.println("Закрываем уведомление 'Нет, не нужно' (если есть)...");
-        if (messagesPage.locator("button:has-text('Нет, не нужно')").isVisible()) {
+        System.out.println("⌛ Ждём список чатов...");
+        for (int i = 0; i < 20; i++) {
+            if (messagesPage.locator("mws-conversation-list-item").count() > 0) break;
             messagesPage.waitForTimeout(1000);
-            messagesPage.click("button:has-text('Нет, не нужно')");
         }
 
-        System.out.println("Жмём 'Подключить, отсканировав QR-код'...");
-        messagesPage.waitForTimeout(1000);
-        messagesPage.locator("span.qr-text:has-text('Подключить, отсканировав QR-код')").click();
+        System.out.println("🔍 Ищем чат с 1xBet...");
+        Locator chat = messagesPage.locator("mws-conversation-list-item:has-text('1xbet'), mws-conversation-list-item:has-text('1xbet-kz')");
+        if (chat.count() == 0) chat = messagesPage.locator("mws-conversation-list-item").first();
+        chat.first().click();
+        messagesPage.waitForTimeout(2000);
 
-        System.out.println("Ищем последнее сообщение от 1xBet...");
-        Locator lastMessage = messagesPage.locator("mws-conversation-list-item").first();
-        lastMessage.waitFor();
-
-        String smsText = lastMessage.innerText();
-        System.out.println("Содержимое SMS: " + smsText);
-
-        Pattern pattern = Pattern.compile("\\b[a-zA-Z0-9]{6,8}\\b");
-        Matcher matcher = pattern.matcher(smsText);
-        String code = null;
-        if (matcher.find()) {
-            code = matcher.group();
+        System.out.println("📩 Ищем последнее сообщение...");
+        Locator msg = messagesPage.locator("div.text-msg-content div.text-msg.msg-content div.ng-star-inserted");
+        int count = 0;
+        for (int i = 0; i < 15; i++) {
+            count = msg.count();
+            if (count > 0) break;
+            messagesPage.waitForTimeout(1000);
         }
+        if (count == 0)
+            throw new RuntimeException("❌ Сообщения не найдены в Google Messages!");
 
-        if (code == null) {
-            messagesPage.close(); // На всякий случай закрываем даже если не нашли
-            throw new RuntimeException("Не удалось извлечь код подтверждения из SMS: " + smsText);
-        }
+        String lastMsg = msg.nth(count - 1).innerText().trim();
+        System.out.println("📨 Последнее сообщение: " + lastMsg);
 
-        System.out.println("Извлечённый код подтверждения: " + code);
+        Matcher matcher = Pattern.compile("\\b[a-zA-Z0-9]{4,8}\\b").matcher(lastMsg);
+        String code = matcher.find() ? matcher.group() : null;
+        if (code == null)
+            throw new RuntimeException("❌ Код не найден в сообщении!");
+        System.out.println("✅ Извлечённый код: " + code);
 
-        // --- ЗАКРЫВАЕМ ВКЛАДКУ С GOOGLE MESSAGES ---
-        messagesPage.close();
-
-        // --- ВВОДИМ КОД ---
-        System.out.println("Вводим код подтверждения...");
+        // --- Вводим код ---
+        page.bringToFront();
         page.fill("input.phone-sms-modal-code__input", code);
+        page.click("button.phone-sms-modal-content__send:has-text('Подтвердить')");
+        page.waitForTimeout(3000);
 
-        // --- ПОДТВЕРЖДАЕМ ВВЕДЁННЫЙ КОД ---
-        System.out.println("Подтверждаем код (жмём кнопку 'Подтвердить')...");
-        page.click("button.phone-sms-modal-content__send");
-
+        // --- Личный кабинет и выход ---
+        System.out.println("Открываем 'Личный кабинет'");
+        page.click("button.user-header__link.header__link.header__reg.header__reg_ico.ion-android-person");
         page.waitForTimeout(2000);
 
-        // --- Переход в Личный кабинет ---
-        System.out.println("Переход в Личный кабинет...");
+        System.out.println("Жмём 'Выход'");
+        page.click("button.drop-menu-list__link_exit:has-text('Выход')");
         page.waitForTimeout(1000);
-        page.click("button.user-header__link.header__link.header__reg.header__reg_ico.ion-android-person.header__link--messages");
 
-        // --- Клик "Выход" ---
-        System.out.println("Кликаем 'Выход'...");
-        Locator logoutButton = page.locator("button.drop-menu-list__link_exit");
-        logoutButton.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
-        logoutButton.click();
+        System.out.println("Подтверждаем выход 'ОК'");
+        page.click("button.swal2-confirm.swal2-styled:has-text('ОК')");
+        page.waitForTimeout(2000);
 
-        // --- Подтверждаем выход ---
-        System.out.println("Подтверждаем выход...");
-        Locator okButton = page.locator("button.swal2-confirm.swal2-styled");
-        okButton.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
-        okButton.click();
+        System.out.println("✅ Выход выполнен");
 
-        System.out.println("Выход из аккаунта выполнен успешно!");
+        long duration = (System.currentTimeMillis() - start) / 1000;
+        String summary = "✅ *Тест v2_MOBI_social_authorization завершён успешно*\n"
+                + "• Авторизация через Google — выполнена\n"
+                + "• Код подтверждения — *" + code + "*\n"
+                + "• Выход — произведён\n"
+                + "🕒 Время выполнения: *" + duration + " сек.*\n"
+                + "🌐 [1xbet.kz](https://1xbet.kz)\n"
+                + "_Браузер остаётся открытым._";
 
-        page.waitForTimeout(5000);
+        System.out.println(summary);
+        Telegram.send(summary, botToken, chatId);
+    }
+
+    // --- Telegram helper ---
+    static class Telegram {
+        static void send(String text, String botToken, String chatId) {
+            try {
+                String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
+                String data = "chat_id=" + chatId
+                        + "&text=" + java.net.URLEncoder.encode(text, "UTF-8")
+                        + "&parse_mode=Markdown";
+                java.net.http.HttpClient.newHttpClient().send(
+                        java.net.http.HttpRequest.newBuilder()
+                                .uri(java.net.URI.create(url))
+                                .header("Content-Type", "application/x-www-form-urlencoded")
+                                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(data))
+                                .build(),
+                        java.net.http.HttpResponse.BodyHandlers.discarding()
+                );
+                System.out.println("📨 Сообщение отправлено в Telegram");
+            } catch (Exception e) {
+                System.out.println("⚠️ Ошибка Telegram: " + e.getMessage());
+            }
+        }
     }
 }

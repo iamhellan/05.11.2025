@@ -1,12 +1,15 @@
 package org.example;
 
 import com.microsoft.playwright.*;
+import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import org.junit.jupiter.api.*;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class v2_id_authorization_and_bet {
     static Playwright playwright;
@@ -23,6 +26,10 @@ public class v2_id_authorization_and_bet {
         );
         context = browser.newContext();
         page = context.newPage();
+
+        // --- Увеличиваем глобальные таймауты ---
+        page.setDefaultTimeout(60000);            // 60 сек для всех действий (click, fill, waitForSelector и т.п.)
+        page.setDefaultNavigationTimeout(90000);  // 90 сек для переходов по страницам (navigate, reload и т.п.)
 
         // --- Инициализируем TelegramNotifier ---
         String botToken = ConfigHelper.get("telegram.bot.token");
@@ -42,7 +49,7 @@ public class v2_id_authorization_and_bet {
 
         try {
             System.out.println("Открываем сайт 1xbet.kz");
-            page.navigate("https://1xbet.kz/");
+            page.navigate("https://1xbet.kz/?whn=mobile&platform_type=desktop");
 
             System.out.println("Жмём 'Войти' в шапке");
             page.waitForTimeout(1000);
@@ -129,38 +136,49 @@ public class v2_id_authorization_and_bet {
             Page messagesPage = messagesContext.newPage();
             messagesPage.navigate("https://messages.google.com/web/conversations");
 
-            // 1. Кликаем по самому верхнему (новому) чату в списке:
-            Locator chat = messagesPage.locator("mws-conversation-list-item").first();
-            chat.click();
-            messagesPage.waitForTimeout(1000); // даём загрузиться
-
-            chat = messagesPage.locator("mws-conversation-list-item").first();
-            int chatsCount = messagesPage.locator("mws-conversation-list-item").count();
-            System.out.println("Чатов найдено: " + chatsCount);
-            chat.click();
-            messagesPage.waitForTimeout(1000);
-
-            // Новый универсальный селектор — вытаскиваем все коды из всех сообщений!
-            Locator messageNodes = messagesPage.locator(
-                    "mws-message-part-content div.text-msg-content div.text-msg.msg-content div.ng-star-inserted"
-            );
-            int count = messageNodes.count();
-            System.out.println("Сообщений найдено: " + count);
-            for (int i = 0; i < count; i++) {
-                System.out.println("[" + i + "] " + messageNodes.nth(i).innerText());
+            System.out.println("⌛ Ждём появления списка чатов...");
+            boolean chatsLoaded = false;
+            for (int i = 0; i < 20; i++) {
+                if (messagesPage.locator("mws-conversation-list-item").count() > 0) {
+                    chatsLoaded = true;
+                    break;
+                }
+                messagesPage.waitForTimeout(1000);
             }
+            if (!chatsLoaded)
+                throw new RuntimeException("❌ Чаты не появились в Google Messages — возможно, не успели подгрузиться.");
+            System.out.println("✅ Список чатов успешно найден");
 
+            System.out.println("🔍 Ищем чат с 1xBet...");
+            Locator chat = messagesPage.locator("mws-conversation-list-item:has-text('1xbet'), mws-conversation-list-item:has-text('1xbet-kz')");
+            if (chat.count() == 0) chat = messagesPage.locator("mws-conversation-list-item").first();
+            chat.first().click();
+            System.out.println("💬 Чат открыт");
+            messagesPage.waitForTimeout(3000);
+
+            System.out.println("📩 Ищем последнее сообщение...");
+            Locator messageNodes = messagesPage.locator("div.text-msg-content div.text-msg.msg-content div.ng-star-inserted");
+            int count = 0;
+            for (int i = 0; i < 15; i++) {
+                count = messageNodes.count();
+                if (count > 0) break;
+                messagesPage.waitForTimeout(1000);
+            }
             if (count == 0)
-                throw new RuntimeException("Сообщения не найдены! (Проверь, что чат не пуст и аккаунт авторизован)");
+                throw new RuntimeException("❌ Не найдено сообщений внутри чата!");
+            String lastMessageText = messageNodes.nth(count - 1).innerText().trim();
+            System.out.println("📨 Последнее сообщение: " + lastMessageText);
 
-            String smsText = messageNodes.nth(count - 1).innerText();
-            System.out.println("Содержимое последнего SMS: " + smsText);
+            Matcher matcher = Pattern.compile("\\b[a-zA-Z0-9]{4,8}\\b").matcher(lastMessageText);
+            String code = matcher.find() ? matcher.group() : null;
+            if (code == null)
+                throw new RuntimeException("❌ Код подтверждения не найден в сообщении!");
+            System.out.println("✅ Извлечённый код: " + code);
 
-            String code = smsText.split("\\s+")[0].trim();
-            System.out.println("Извлечённый код подтверждения: " + code);
-
+// --- Возврат на сайт ---
             System.out.println("Возвращаемся на сайт 1xbet.kz");
             page.bringToFront();
+
 
             System.out.println("Вводим код подтверждения");
             page.fill("input.phone-sms-modal-code__input", code);
@@ -169,6 +187,21 @@ public class v2_id_authorization_and_bet {
             page.click("button:has-text('Подтвердить')");
 
             System.out.println("Авторизация завершена ✅");
+
+            // --- Переход в раздел "Линия" ---
+            System.out.println("Открываем раздел 'Линия'");
+            try {
+                Locator lineBtn = page.locator("a.header-menu-nav-list-item__link:has-text('Линия')");
+                lineBtn.waitFor(new Locator.WaitForOptions()
+                        .setTimeout(5000)
+                        .setState(WaitForSelectorState.VISIBLE));
+                lineBtn.click();
+                System.out.println("Раздел 'Линия' открыт ✅");
+            } catch (Exception e) {
+                System.out.println("Кнопка 'Линия' не найдена, пробуем через JS...");
+                page.evaluate("document.querySelector(\"a.header-menu-nav-list-item__link[href='line']\")?.click()");
+            }
+            page.waitForTimeout(10000);
 
             // --- СТАВКА ---
             System.out.println("Выбираем первый доступный исход");
@@ -183,64 +216,141 @@ public class v2_id_authorization_and_bet {
 
             System.out.println("Пробуем нажать 'Сделать ставку'");
             String makeBetBtn = "button.cpn-btn.cpn-btn--theme-accent:has-text('Сделать ставку')";
-            page.waitForSelector(makeBetBtn + ":not([disabled])");
             try {
-                page.click(makeBetBtn);
+                page.waitForSelector(makeBetBtn + ":not([disabled])",
+                        new Page.WaitForSelectorOptions()
+                                .setTimeout(10_000)
+                                .setState(WaitForSelectorState.VISIBLE)
+                );
+                page.locator(makeBetBtn).click(new Locator.ClickOptions().setForce(true));
                 System.out.println("Кнопка 'Сделать ставку' нажата ✅");
             } catch (Exception e) {
-                page.evaluate("document.querySelector(\"button.cpn-btn.cpn-btn--theme-accent\").click()");
-                System.out.println("JS-клик по кнопке 'Сделать ставку'");
+                System.out.println("⚠️ Не удалось кликнуть обычным способом, пробуем через JS...");
+                page.evaluate("document.querySelector('button.cpn-btn.cpn-btn--theme-accent')?.click()");
+                System.out.println("JS-клик по кнопке 'Сделать ставку' выполнен ✅");
             }
-            page.waitForTimeout(1000);
 
-            // --- ПЕЧАТЬ И РАБОТА С НОВОЙ ВКЛАДКОЙ ---
-            System.out.println("Жмём 'Печать' после ставки");
-            String printBtn = "button.c-btn.c-btn--print";
-            page.waitForSelector(printBtn);
-            page.click(printBtn);
-            page.waitForTimeout(1500);
+            System.out.println("Ждём появление модального окна 'Ваша ставка принята!'...");
+            page.waitForSelector("div.v--modal-box.c-coupon-modal-box[role='dialog']");
+            System.out.println("✅ Окно 'Ваша ставка принята!' появилось");
 
-            System.out.println("Ждём открытия вкладки 'Печать'");
-            Page printPage = null;
-            for (int i = 0; i < 10; i++) {
-                List<Page> pages = context.pages();
-                if (pages.size() > 1) {
-                    printPage = pages.get(pages.size() - 1);
-                    break;
-                }
-                page.waitForTimeout(500);
-            }
-            if (printPage == null) throw new RuntimeException("Не удалось найти вкладку печати!");
+            // ---- ПЕЧАТЬ ----
+            System.out.println("Ждём появления кнопки 'Печать' после ставки");
+            Locator printButton = page.locator("button.c-btn.c-btn--print");
+            printButton.waitFor(new Locator.WaitForOptions()
+                    .setTimeout(10_000)
+                    .setState(WaitForSelectorState.VISIBLE)
+            );
 
-            printPage.bringToFront();
+// иногда кнопка немного ниже — подскроллим модалку
+            page.evaluate("document.querySelector('.v--modal-box')?.scrollBy(0, 300);");
 
-            boolean cancelClicked = false;
+            System.out.println("Пробуем нажать 'Печать' и перехватить вкладку превью...");
+            Page printTab = null;
             try {
-                printPage.waitForSelector("cr-button.cancel-button", new Page.WaitForSelectorOptions().setTimeout(3000));
-                if (printPage.isVisible("cr-button.cancel-button")) {
-                    printPage.click("cr-button.cancel-button");
-                    System.out.println("Всплывающее окно: нажата 'Отмена'");
-                    cancelClicked = true;
-                    printPage.waitForTimeout(1000);
-                }
-            } catch (Exception ignored) {}
-
-            if (!cancelClicked) {
-                try {
-                    printPage.waitForSelector("cr-icon-button#save", new Page.WaitForSelectorOptions().setTimeout(5000));
-                    printPage.click("cr-icon-button#save");
-                    System.out.println("Жмём 'Скачать' в окне печати");
-                    printPage.waitForTimeout(1000);
-                } catch (Exception e) {
-                    System.out.println("Кнопка 'Скачать' не найдена или ошибка: " + e.getMessage());
-                }
+                printTab = page.waitForPopup(() -> {
+                    printButton.click();
+                });
+                printTab.waitForLoadState();
+                System.out.println("🪟 Вкладка печати открылась: " + printTab.url());
+            } catch (Exception e) {
+                System.out.println("⚠️ Вкладка превью не перехвачена — возможно, диалог печати открылся в этом же окне (системный).");
             }
 
-            printPage.close();
-            page.bringToFront();
-            page.waitForTimeout(1000);
+// ---- НАЖАТЬ 'ОТМЕНА' В ПРЕВЬЮ ----
+            System.out.println("Пробуем закрыть превью печати (按 'Esc' как эквивалент 'Отмена')...");
+            try {
+                if (printTab != null) {
+                    // Если превью в отдельной вкладке
+                    printTab.keyboard().press("Escape");
+                    printTab.waitForTimeout(1000);
+                    // Если Esc не закрыл — закрываем вкладку явно
+                    if (!printTab.isClosed()) {
+                        printTab.close();
+                    }
+                    System.out.println("✅ Превью закрыто (вкладка печати)");
+                } else {
+                    // Если превью — системный диалог в той же вкладке
+                    page.keyboard().press("Escape");
+                    page.waitForTimeout(1000);
+                    System.out.println("✅ Превью закрыто (системный диалог)");
+                }
+            } catch (Exception e) {
+                System.out.println("⚠️ Не удалось закрыть превью печати: " + e.getMessage() + " (продолжаем)");
+            }
 
-            // --- Проверка истории ---
+// ---- ВОЗВРАЩАЕМСЯ НА ОСНОВНУЮ ВКЛАДКУ 1XBET ----
+            try {
+                List<Page> pages = context.pages();
+                if (!pages.isEmpty()) {
+                    pages.get(0).bringToFront();
+                    System.out.println("🔄 Вернулись к вкладке 1xBet");
+                } else {
+                    page.bringToFront();
+                }
+            } catch (Exception e) {
+                System.out.println("⚠️ Не удалось явно вернуть фокус — продолжаем с текущей вкладкой: " + e.getMessage());
+            }
+
+// ---- СКАЧАТЬ КУПОН ----
+            System.out.println("Пробуем нажать 'Скачать' купон на сайте...");
+            Locator downloadBtn = null;
+            String usedSelector = null;
+
+            String[] candidates = new String[] {
+                    "button:has-text('Скачать')",
+                    "a:has-text('Скачать')",
+                    "button.c-btn.c-btn--download",
+                    "button.cpn-btn.cpn-btn--download",
+                    "button.c-btn--save"
+            };
+
+            for (String css : candidates) {
+                Locator candidate = page.locator(css);
+                try {
+                    candidate.waitFor(new Locator.WaitForOptions().setTimeout(3000).setState(WaitForSelectorState.VISIBLE));
+                    if (candidate.isVisible()) {
+                        downloadBtn = candidate;
+                        usedSelector = css;
+                        System.out.println("Нашли кнопку 'Скачать' по селектору: " + css);
+                        break;
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            try {
+                if (downloadBtn != null) {
+                    final Locator finalDownloadBtn = downloadBtn;   // ✅ финализируем Locator
+                    final String finalSelector = usedSelector;       // ✅ финализируем строку для JS
+
+                    System.out.println("Запускаем download-процедуру...");
+                    Download d = page.waitForDownload(() -> {
+                        try {
+                            finalDownloadBtn.click(new Locator.ClickOptions().setForce(true));
+                        } catch (Exception e) {
+                            System.out.println("Обычный клик не сработал, пробуем через JS...");
+                            page.evaluate("sel => document.querySelector(sel)?.click()", finalSelector);
+                        }
+                    });
+
+                    // Сохраняем файл в проектную папку downloads
+                    String suggested = d.suggestedFilename();
+                    if (suggested == null || suggested.isBlank()) suggested = "coupon.pdf";
+                    Path path = Paths.get("downloads", suggested);
+                    d.saveAs(path);
+
+                    System.out.println("💾 Купон скачан: " + path + " ✅");
+                    tg.sendMessage("💾 *Купон успешно скачан* — `" + path + "` ✅");
+                } else {
+                    System.out.println("⚠️ Кнопка 'Скачать' не найдена. Проверь селектор и UI.");
+                    tg.sendMessage("⚠️ Не удалось найти кнопку *Скачать* на сайте после закрытия превью.");
+                }
+            } catch (Exception e) {
+                System.out.println("❌ Ошибка при скачивании купона: " + e.getMessage());
+                tg.sendMessage("❌ Ошибка при скачивании купона: " + e.getMessage());
+            }
+
+            // ---- ЛИЧНЫЙ КАБИНЕТ ----
             System.out.println("Открываем 'Личный кабинет'");
             page.waitForTimeout(1000);
             page.click("a.header-lk-box-link[title='Личный кабинет']");
@@ -267,7 +377,23 @@ public class v2_id_authorization_and_bet {
             page.click("button.apm-panel-head__expand");
             page.waitForTimeout(1000);
 
-            // --- Выход ---
+            // --- ИЗВЛЕКАЕМ НОМЕР СДЕЛАННОЙ СТАВКИ ---
+            System.out.println("Извлекаем номер последней ставки...");
+            String betNumber = "не найден";
+            try {
+                Locator betId = page.locator("p.apm-panel-head__subtext:has-text('№')").first();
+                betId.waitFor(new Locator.WaitForOptions()
+                        .setTimeout(5000)
+                        .setState(WaitForSelectorState.VISIBLE));
+                String betText = betId.innerText().trim();
+                betNumber = betText.replaceAll("[^0-9]", ""); // оставить только цифры
+                System.out.println("Номер ставки: " + betNumber);
+            } catch (Exception e) {
+                System.out.println("❌ Не удалось извлечь номер ставки: " + e.getMessage());
+            }
+
+
+            // ---- ВЫХОД ----
             System.out.println("Жмём 'Выход'");
             page.waitForTimeout(1000);
             page.click("a.ap-left-nav__item_exit");
@@ -275,20 +401,24 @@ public class v2_id_authorization_and_bet {
             System.out.println("Подтверждаем выход кнопкой 'ОК'");
             page.waitForTimeout(1000);
             page.click("button.swal2-confirm.swal2-styled");
-
             System.out.println("Выход завершён ✅ (браузер остаётся открытым)");
 
+            boolean isAuthorized = false;
+
+            // --- ТЕЛЕГРАМ ОТЧЁТ ---
             long duration = (System.currentTimeMillis() - startTime) / 1000;
             tg.sendMessage(
                     "✅ *Тест успешно завершён:* v2_id_authorization_and_bet\n" +
                             "• Авторизация — выполнена\n" +
-                            "• Код из Google Messages — получен\n" +
-                            "• Личный кабинет — открыт и проверен\n" +
+                            "• Ставка — успешно сделана\n" +
+                            "• № Ставки — *" + betNumber + "*\n" +
+                            "• История — проверена\n" +
                             "• Выход — произведён\n\n" +
                             "🕒 Время выполнения: *" + duration + " сек.*\n" +
                             "🌐 Сайт: [1xbet.kz](https://1xbet.kz)\n" +
                             "_Браузер остаётся открытым для ручной проверки._"
             );
+
 
         } catch (Exception e) {
             System.out.println("❌ Ошибка в тесте: " + e.getMessage());

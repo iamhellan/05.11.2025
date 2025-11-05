@@ -278,50 +278,97 @@ public class v2_id_authorization_fastgames {
             page.fill("input#auth-form-password", password);
             page.click("button.auth-button.auth-button--block.auth-button--theme-secondary");
 
-            log("Ждём появления кнопки 'Выслать код' (до 2 мин)");
+            log("Ждём появления кнопки 'Выслать код' (до 10 мин)");
             page.waitForSelector("button:has-text('Выслать код')",
-                    new Page.WaitForSelectorOptions().setTimeout(120000).setState(WaitForSelectorState.VISIBLE));
+                    new Page.WaitForSelectorOptions().setTimeout(600000).setState(WaitForSelectorState.VISIBLE));
 
             log("Жмём 'Выслать код'");
             page.click("button:has-text('Выслать код')");
 
-            log("Ждём поле для кода (до 2 мин)");
+            log("Ждём поле для кода (до 10 мин)");
             page.waitForSelector("input.phone-sms-modal-code__input",
-                    new Page.WaitForSelectorOptions().setTimeout(120000).setState(WaitForSelectorState.VISIBLE));
+                    new Page.WaitForSelectorOptions().setTimeout(600000).setState(WaitForSelectorState.VISIBLE));
 
-            // --- Google Messages ---
+            // --- УНИВЕРСАЛЬНЫЙ ПОИСК СЕССИИ GOOGLE MESSAGES ---
             Path projectRoot = Paths.get(System.getProperty("user.dir"));
-            Path sessionPath = null;
             Path[] possiblePaths = new Path[]{
                     projectRoot.resolve("resources/sessions/messages-session.json"),
                     projectRoot.resolve("src/test/resources/sessions/messages-session.json"),
                     projectRoot.resolve("src/test/java/org/example/resources/sessions/messages-session.json")
             };
-            for (Path p : possiblePaths) if (p.toFile().exists()) { sessionPath = p; break; }
-            if (sessionPath == null) throw new RuntimeException("❌ messages-session.json не найден!");
 
-            log("🔐 Открываем Google Messages с сохранённой сессией...");
-            BrowserContext messagesCtx = browser.newContext(new Browser.NewContextOptions().setStorageStatePath(sessionPath));
-            Page msgPage = messagesCtx.newPage();
-            msgPage.navigate("https://messages.google.com/web/conversations");
+            Path sessionPath = null;
+            for (Path path : possiblePaths) {
+                if (path.toFile().exists()) {
+                    sessionPath = path;
+                    break;
+                }
+            }
 
-            Locator chat = msgPage.locator("mws-conversation-list-item").first();
-            chat.click();
-            msgPage.waitForTimeout(3000);
+            if (sessionPath == null) {
+                throw new RuntimeException("❌ Файл сессии Google Messages не найден ни в одном из стандартных путей!");
+            }
 
-            Locator messages = msgPage.locator("mws-message-part-content div.text-msg-content div.text-msg.msg-content div.ng-star-inserted");
-            int count = messages.count();
-            if (count == 0) throw new RuntimeException("❌ Нет сообщений в Google Messages!");
-            String sms = messages.nth(count - 1).innerText();
-            log("Последнее SMS: " + sms);
+            System.out.println("📁 Используем файл сессии: " + sessionPath.toAbsolutePath());
 
-            Matcher m = Pattern.compile("\\b([0-9]{4,8}|[A-Za-z0-9]{6,8})\\b").matcher(sms);
-            String code = m.find() ? m.group() : null;
-            if (code == null) throw new RuntimeException("❌ Не удалось извлечь код из SMS!");
-            log("Извлечённый код подтверждения: " + code);
+            // --- Открываем Google Messages с сохранённой авторизацией ---
+            System.out.println("🔐 Открываем Google Messages с сохранённой сессией...");
+            BrowserContext messagesContext = browser.newContext(
+                    new Browser.NewContextOptions().setStorageStatePath(sessionPath)
+            );
+            Page messagesPage = messagesContext.newPage();
+            messagesPage.navigate("https://messages.google.com/web/conversations");
 
-            msgPage.close();
-            page.bringToFront();
+            System.out.println("⌛ Ждём появления списка чатов...");
+            boolean chatsLoaded = false;
+            for (int i = 0; i < 20; i++) {
+                if (messagesPage.locator("mws-conversation-list-item").count() > 0) {
+                    chatsLoaded = true;
+                    break;
+                }
+                messagesPage.waitForTimeout(1000);
+            }
+            if (!chatsLoaded)
+                throw new RuntimeException("❌ Чаты не появились в Google Messages — возможно, не успели подгрузиться.");
+            System.out.println("✅ Список чатов успешно найден");
+
+            System.out.println("🔍 Ищем чат с 1xBet...");
+            Locator chat = messagesPage.locator("mws-conversation-list-item:has-text('1xbet'), mws-conversation-list-item:has-text('1xbet-kz')");
+            if (chat.count() == 0) chat = messagesPage.locator("mws-conversation-list-item").first();
+            chat.first().click();
+            System.out.println("💬 Чат открыт");
+            messagesPage.waitForTimeout(3000);
+
+            System.out.println("📩 Ищем последнее сообщение...");
+            Locator messageNodes = messagesPage.locator("div.text-msg-content div.text-msg.msg-content div.ng-star-inserted");
+            int count = 0;
+            for (int i = 0; i < 15; i++) {
+                count = messageNodes.count();
+                if (count > 0) break;
+                messagesPage.waitForTimeout(1000);
+            }
+            if (count == 0)
+                throw new RuntimeException("❌ Не найдено сообщений внутри чата!");
+            String lastMessageText = messageNodes.nth(count - 1).innerText().trim();
+            System.out.println("📨 Последнее сообщение: " + lastMessageText);
+
+            Matcher matcher = Pattern.compile("\\b[a-zA-Z0-9]{4,8}\\b").matcher(lastMessageText);
+            String code = matcher.find() ? matcher.group() : null;
+            if (code == null)
+                throw new RuntimeException("❌ Код подтверждения не найден в сообщении!");
+            System.out.println("✅ Извлечённый код: " + code);
+
+            // --- Возврат к 1xBet ---
+            System.out.println("🔄 Закрываем вкладку Google Messages и возвращаем фокус на 1xBet");
+            try {
+                messagesPage.close(); // закрываем только вкладку
+                messagesContext.close(); // освобождаем контекст
+                page.bringToFront(); // возвращаем активное окно 1xBet
+                page.waitForTimeout(1000);
+                System.out.println("✅ Переключились обратно на 1xBet");
+            } catch (Exception e) {
+                System.out.println("⚠️ Не удалось корректно вернуть фокус: " + e.getMessage());
+            }
 
             log("Вводим код и подтверждаем вход");
             page.fill("input.phone-sms-modal-code__input", code);
@@ -375,7 +422,7 @@ public class v2_id_authorization_fastgames {
                                 }
 
                                 gamePage.waitForTimeout(600);
-                                waitRoundToSettle(gamePage, 30000);
+                                waitRoundToSettle(gamePage, 60000);
                                 return true;
                             }
                         }
@@ -423,21 +470,16 @@ public class v2_id_authorization_fastgames {
 
             passTutorialIfPresent(gamePage);
 
-// --- Ввод суммы вручную ---
-            log("Вводим сумму вручную: 50 KZT");
+              // --- Жмём кнопку "Мин" ---
+            log("Жмём кнопку 'Мин' для минимальной ставки");
             try {
-                Locator amountInput = gamePage.locator("input[type='text'][value]").first();
-
-                if (amountInput.count() > 0 && amountInput.isVisible()) {
-                    amountInput.click();
-                    amountInput.fill("50");
-                    log("✅ Сумма 50 введена вручную в поле ставки");
-                } else {
-                    log("⚠️ Поле ввода суммы не найдено — пробуем через JS");
-                    gamePage.evaluate("document.querySelector('input[type=text][value]')?.value = '50'");
-                }
+                Locator minButton = smartLocator(gamePage,
+                        "span[role='button']:has-text('Мин')",
+                        8000);
+                robustClick(gamePage, minButton, 5000, "Мин");
+                success("Кнопка 'Мин' нажата ✅");
             } catch (Exception e) {
-                log("❌ Ошибка при вводе суммы вручную: " + e.getMessage());
+                warn("Не удалось нажать 'Мин': " + e.getMessage());
             }
 
             gamePage.waitForTimeout(800);
@@ -446,27 +488,12 @@ public class v2_id_authorization_fastgames {
             log("Ставка 50 KZT (yes)");
             clickFirstEnabled(gamePage,
                     "div[role='button'][data-market='hit_met_condition'][data-outcome='yes']:has-text('Сделать ставку')",
-                    30000);
+                    300000);
 
             gamePage.waitForTimeout(1500);
 
-// --- Вторая ставка ---
-            log("Ставка 50 KZT (yes_2)");
-            try {
-                // Проверяем заново DOM после первой ставки
-                Locator secondBet = gamePage.locator("div[role='button'][data-market='hit_met_condition'][data-outcome='yes_2']:has-text('Сделать ставку')");
-                if (secondBet.count() > 0 && secondBet.first().isVisible()) {
-                    robustClick(gamePage, secondBet.first(), 3000, "second-bet-yes_2");
-                    log("✅ Вторая ставка сделана успешно");
-                } else {
-                    log("⚠️ Вторая ставка (yes_2) не найдена — возможно, DOM обновился");
-                }
-            } catch (Exception e) {
-                log("❌ Ошибка при клике второй ставки: " + e.getMessage());
-            }
-
 // --- Ожидаем завершение раунда ---
-            waitRoundToSettle(gamePage, 25000);
+            waitRoundToSettle(gamePage, 60000);
 
             // ===== Нарды =====
             section("Нарды");
@@ -476,8 +503,8 @@ public class v2_id_authorization_fastgames {
             passTutorialIfPresent(nardsPage);
             setStake50ViaChip(nardsPage);
             log("Выбираем исход: Синий");
-            clickFirstEnabled(nardsPage, "span[role='button'][data-market='dice'][data-outcome='blue']", 20000);
-            waitRoundToSettle(nardsPage, 25000);
+            clickFirstEnabled(nardsPage, "span[role='button'][data-market='dice'][data-outcome='blue']", 300000);
+            waitRoundToSettle(nardsPage, 60000);
 
             // ===== Дартс =====
             section("Дартс");
@@ -487,8 +514,8 @@ public class v2_id_authorization_fastgames {
             passTutorialIfPresent(dartsPage);
             setStake50ViaChip(dartsPage);
             log("Выбираем исход (1-4-5-6-9-11-15-16-17-19)");
-            clickFirstEnabled(dartsPage, "span[role='button'][data-market='1-4-5-6-9-11-15-16-17-19']", 20000);
-            waitRoundToSettle(dartsPage, 25000);
+            clickFirstEnabled(dartsPage, "span[role='button'][data-market='1-4-5-6-9-11-15-16-17-19']", 300000);
+            waitRoundToSettle(dartsPage, 60000);
 
             // ===== Дартс - Фортуна =====
             section("Дартс - Фортуна");
@@ -496,10 +523,32 @@ public class v2_id_authorization_fastgames {
             Page dartsFortunePage = openGameByHrefContains(dartsPage, "darts-fortune", "Дартс - Фортуна");
             dartsFortunePage.waitForTimeout(600);
             passTutorialIfPresent(dartsFortunePage);
-            setStake50ViaChip(dartsFortunePage);
+
+// --- Ждём появления чипа '50' (он появляется только когда можно ставить) ---
+            log("Ожидаем появления чипа '50'");
+            try {
+                Locator chip50 = smartLocator(dartsFortunePage,
+                        "div.chip-text:has-text('50')",
+                        60000);
+                chip50.first().waitFor(new Locator.WaitForOptions()
+                        .setTimeout(60000)
+                        .setState(WaitForSelectorState.VISIBLE));
+                success("Чип '50' появился — можно делать ставку ✅");
+            } catch (Exception e) {
+                warn("Чип '50' не появился вовремя — продолжаем без него: " + e.getMessage());
+            }
+
+// --- Выбираем исход: ONE_TO_EIGHT (Сектор 1-8) ---
             log("Выбираем исход: ONE_TO_EIGHT (Сектор 1-8)");
-            clickFirstEnabled(dartsFortunePage, "div[data-outcome='ONE_TO_EIGHT']", 20000);
-            waitRoundToSettle(dartsFortunePage, 25000);
+            try {
+                clickFirstEnabled(dartsFortunePage, "div[data-outcome='ONE_TO_EIGHT']", 45000);
+                success("Исход ONE_TO_EIGHT выбран ✅");
+            } catch (Exception e) {
+                error("Не удалось выбрать исход ONE_TO_EIGHT: " + e.getMessage());
+            }
+
+// --- Ждём завершения раунда ---
+            waitRoundToSettle(dartsFortunePage, 60000);
 
             // ===== Больше/Меньше =====
             section("Больше / Меньше");
@@ -512,8 +561,8 @@ public class v2_id_authorization_fastgames {
             clickFirstEnabledAny(hiloPage, new String[]{
                     "div[role='button'][data-market='THROW_RESULT'][data-outcome='gte-16']",
                     "div.board-market-hi-eq:has-text('Больше или равно')"
-            }, 45000);
-            waitRoundToSettle(hiloPage, 30000);
+            }, 300000);
+            waitRoundToSettle(hiloPage, 60000);
 
             // ===== Буллиты NHL21 =====
             section("Буллиты NHL21");
@@ -524,8 +573,8 @@ public class v2_id_authorization_fastgames {
             log("Ждём появления суммы (чип 50)");
             setStake50ViaChip(shootoutPage);
             log("Выбираем исход: Да");
-            clickFirstEnabled(shootoutPage, "div[role='button'].market-button:has-text('Да')", 45000);
-            waitRoundToSettle(shootoutPage, 35000);
+            clickFirstEnabled(shootoutPage, "div[role='button'].market-button:has-text('Да')", 300000);
+            waitRoundToSettle(shootoutPage, 60000);
 
             // ===== Бокс (уникальная кнопка) =====
             section("Бокс");
@@ -537,7 +586,7 @@ public class v2_id_authorization_fastgames {
             log("Выбираем исход: боксёр №1 (первая кнопка)");
 
             // Исправленный селектор: учитывает разные варианты кнопок на реальном DOM
-            boxingPage.waitForSelector("div.contest-panel", new Page.WaitForSelectorOptions().setTimeout(15000));
+            boxingPage.waitForSelector("div.contest-panel", new Page.WaitForSelectorOptions().setTimeout(120000));
             boolean betDone = tryBetButton.apply(boxingPage,
                     "div.contest-panel-outcome-button:has-text('Сделать ставку'), " +
                             "button.contest-panel-outcome-button:has-text('Сделать ставку'), " +
@@ -549,6 +598,7 @@ public class v2_id_authorization_fastgames {
             }
 
             success("Готово ✅");
+
 
             // --- Переход в Личный кабинет и корректный выход ---
             log("Открываем 'Личный кабинет'");

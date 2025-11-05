@@ -3,7 +3,9 @@ package org.example;
 import com.microsoft.playwright.*;
 import org.junit.jupiter.api.Test;
 import com.microsoft.playwright.options.*;
+import java.util.regex.Pattern;
 
+import java.nio.file.Paths;
 import java.util.List;
 
 public class v2_promo {
@@ -18,18 +20,25 @@ public class v2_promo {
             Page mainPage = context.newPage();
 
             // 1. Открываем сайт
-            mainPage.navigate("https://1xbet.kz/");
+            mainPage.navigate("https://1xbet.kz/?whn=mobile&platform_type=desktop");
             System.out.println("Открыли https://1xbet.kz/");
 
-            // 2. Переходим в раздел "1XBONUS"
+            // 2. Переходим в раздел "1xBONUS"
             mainPage.waitForSelector("a[href='bonus/rules']");
             mainPage.click("a[href='bonus/rules']");
-            mainPage.waitForTimeout(1000);
+            mainPage.waitForLoadState(LoadState.DOMCONTENTLOADED);
+            mainPage.waitForTimeout(1500);
 
-            // 3. Кликаем по "Все бонусы"
-            mainPage.waitForSelector("span.bonuses-navigation-bar__caption:has-text('Все бонусы')");
-            mainPage.click("span.bonuses-navigation-bar__caption:has-text('Все бонусы')");
-            mainPage.waitForTimeout(1000);
+// 3. Переходим во вкладку "Все бонусы"
+            try {
+                Locator allBonusesButton = mainPage.locator("button.bonus-navigation-tabs-item-link:has-text('Все бонусы')");
+                allBonusesButton.waitFor(new Locator.WaitForOptions().setTimeout(10000).setState(WaitForSelectorState.VISIBLE));
+                allBonusesButton.click();
+                System.out.println("Открыли вкладку 'Все бонусы' ✅");
+            } catch (Exception e) {
+                System.out.println("❗ Не удалось открыть 'Все бонусы': " + e.getMessage());
+                mainPage.screenshot(new Page.ScreenshotOptions().setPath(Paths.get("error_all_bonuses.png")));
+            }
 
             // 4. Ждём список бонусов
             mainPage.waitForSelector("ul.bonuses-list");
@@ -49,6 +58,31 @@ public class v2_promo {
 
                 // --- Ожидаем полной загрузки страницы акции (теперь вообще неубиваемо)
                 waitForPageLoaded(tab, url, i + 1);
+
+                // --- Кликаем по контейнеру, в котором расположен iframe ---
+                try {
+                    System.out.println("Кликаем по контейнеру с iframe (default-layout-container__inner)...");
+
+                    Locator container = tab.locator("div.default-layout-container__inner");
+                    container.waitFor(new Locator.WaitForOptions()
+                            .setTimeout(10000)
+                            .setState(WaitForSelectorState.VISIBLE));
+
+                    BoundingBox box = container.boundingBox();
+                    if (box != null) {
+                        tab.mouse().click(box.x + box.width / 2, box.y + box.height / 2);
+                        System.out.println("Клик по контейнеру выполнен ✅");
+                    } else {
+                        // fallback: если координаты не доступны, кликаем через JS
+                        System.out.println("Клик по координатам не удался, пробуем через JS");
+                        tab.evaluate("document.querySelector('div.default-layout-container__inner')?.click()");
+                    }
+
+                    tab.waitForTimeout(800); // короткая пауза после клика
+
+                } catch (Exception e) {
+                    System.out.println("❗ Не удалось кликнуть по контейнеру: " + e.getMessage());
+                }
 
                 // 1. Скролл вниз и вверх на русском
                 slowScrollDown(tab, 60, 100);
