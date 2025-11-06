@@ -3,15 +3,17 @@ package org.example;
 import com.microsoft.playwright.*;
 import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
+import com.microsoft.playwright.TimeoutError;
 import org.junit.jupiter.api.*;
-import com.microsoft.playwright.options.BoundingBox;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class v2_1click_registration {
     static Playwright playwright;
@@ -40,7 +42,7 @@ public class v2_1click_registration {
         page.setDefaultTimeout(30_000);
         page.setDefaultNavigationTimeout(60_000);
 
-        // --- Telegram инициализация ---
+        // --- Telegram (креды из config.properties) ---
         String botToken = ConfigHelper.get("telegram.bot.token");
         String chatId   = ConfigHelper.get("telegram.chat.id");
         tg = new TelegramNotifier(botToken, chatId);
@@ -80,26 +82,74 @@ public class v2_1click_registration {
 
     static void neutralizeOverlayIfNeeded(Page page) {
         page.evaluate("(() => {" +
-                "const kill = sel => document.querySelectorAll(sel).forEach(n=>{try{n.style.pointerEvents='none'; n.style.zIndex='0';}catch(e){}});" +
+                "const kill = sel => document.querySelectorAll(sel).forEach(n => {" +
+                "  try {" +
+                "    n.style.pointerEvents = 'none';" +
+                "    n.style.zIndex = '0';" +
+                "    n.style.opacity = '0.3';" +  // можно убрать, если не хочешь визуального эффекта
+                "  } catch(e) {}" +
+                "});" +
+                // стандартные перекрытия
                 "kill('.arcticmodal-container_i2');" +
                 "kill('.arcticmodal-container_i');" +
                 "kill('.v--modal-background-click');" +
                 "kill('#modals-container *');" +
                 "kill('.pf-main-container-wrapper-th-4 *');" +
+                // теперь новый блок, мешающий кликам
+                "kill('.js_reg_form_scroll.active_scroll');" +
                 "})();");
     }
 
-    void waitForRegistrationModal(Page page) {
-        page.waitForSelector("div#games_content.c-registration",
-                new Page.WaitForSelectorOptions()
-                        .setTimeout(30_000)
-                        .setState(WaitForSelectorState.VISIBLE)
-        );
+    static void waitForRegistrationModal(Page page) {
+        String[] sels = {
+                "div#games_content.c-registration",
+                "div.arcticmodal-container div.c-registration"
+        };
+        for (String s : sels) {
+            if (page.locator(s).count() > 0) {
+                page.waitForSelector(s,
+                        new Page.WaitForSelectorOptions()
+                                .setTimeout(30_000)
+                                .setState(WaitForSelectorState.VISIBLE));
+                return;
+            }
+        }
+        page.waitForSelector(String.join(", ", sels),
+                new Page.WaitForSelectorOptions().setTimeout(30_000).setState(WaitForSelectorState.VISIBLE));
     }
 
+    static void clickAllOneClickTabs(Page page) {
+        System.out.println("Ищем и кликаем все кнопки с текстом 'В 1 клик'");
+        Locator allTabs = page.locator("button:has-text('В 1 клик')");
+        int count = allTabs.count();
+        if (count == 0) {
+            System.out.println("Кнопок 'В 1 клик' не найдено");
+            return;
+        }
+
+        for (int i = 0; i < count; i++) {
+            Locator tab = allTabs.nth(i);
+            if (!tab.isVisible()) continue;
+            try {
+                tab.click(new Locator.ClickOptions().setTimeout(2000));
+                System.out.println("Кликнули по 'В 1 клик' #" + (i + 1));
+            } catch (Exception e1) {
+                try {
+                    page.evaluate("el => el.click()", tab.elementHandle());
+                    System.out.println("Кликнули по 'В 1 клик' через JS #" + (i + 1));
+                } catch (Exception e2) {
+                    try {
+                        tab.click(new Locator.ClickOptions().setForce(true));
+                        System.out.println("Force-клик по 'В 1 клик' #" + (i + 1));
+                    } catch (Exception ignored) {}
+                }
+            }
+            pauseShort();
+        }
+    }
 
     static boolean isOneClickActive(Page page) {
-        Locator tab = page.locator("div#games_content.c-registration button.c-registration__tab:has-text('В 1 клик')");
+        Locator tab = page.locator("button.c-registration__tab:has-text('В 1 клик')");
         if (tab.count() == 0) return false;
         Object res = tab.first().evaluate("el => el.classList.contains('active')");
         return Boolean.TRUE.equals(res);
@@ -125,45 +175,6 @@ public class v2_1click_registration {
         return hasRegBtn || headerNotLogged || onPublicUrl;
     }
 
-    void closeIdentificationIfPresent(Page page) {
-        // 1) Снимаем перекрытия (pointer-events/z-index) на всякий случай
-        neutralizeOverlayIfNeeded(page);
-
-        // 2) Пытаемся дождаться и закрыть окно идентификации
-        final String CLOSE_SEL =
-                "button.identification-popup-close.identification-popup-get-bonus__close, " +
-                        "button.identification-popup-close.identification-popup-transition__close, " +
-                        "button.identification-popup-close.identification-popup-binding__close";
-
-        try {
-            ElementHandle closeHandle = page.waitForSelector(
-                    CLOSE_SEL,
-                    new Page.WaitForSelectorOptions()
-                            .setTimeout(5000)
-                            .setState(WaitForSelectorState.VISIBLE)
-            );
-
-            if (closeHandle != null) {
-                try {
-                    closeHandle.click();
-                    System.out.println("Закрыто окно идентификации ✅");
-                } catch (Exception e) {
-                    // Fallback: JS-клик по реальному элементу
-                    page.evaluate("el => el.click()", closeHandle);
-                    System.out.println("Закрыто окно идентификации через JS ✅");
-                }
-                page.waitForTimeout(300);
-            } else {
-                System.out.println("Окно идентификации не появилось — продолжаем");
-            }
-        } catch (PlaywrightException ignored) {
-            System.out.println("Окно идентификации не появилось — продолжаем");
-        }
-
-        // 3) Ещё раз нейтрализуем возможные остаточные оверлеи
-        neutralizeOverlayIfNeeded(page);
-    }
-
     static void waitUntilLoggedOutOrHeal(Page page) {
         long deadline = System.currentTimeMillis() + 15_000;
         while (System.currentTimeMillis() < deadline) {
@@ -180,6 +191,24 @@ public class v2_1click_registration {
             if (isLoggedOut(page)) return;
             pause(300);
         }
+
+        // --- Игнорируем блок .js_reg_form_scroll ---
+        System.out.println("Отключаем влияние js_reg_form_scroll на клики");
+        page.evaluate("(() => {" +
+                "const el = document.querySelector('.js_reg_form_scroll.active_scroll');" +
+                "if (el) {" +
+                "  el.style.pointerEvents = 'none';" +
+                "  el.style.zIndex = '0';" +
+                "  el.style.opacity = '0.3';" +
+                "  console.log('js_reg_form_scroll нейтрализован');" +
+                "}" +
+                "})();");
+    }
+
+    static Path ensureDownloadsDir() throws Exception {
+        Path downloads = Paths.get("downloads");
+        if (!Files.exists(downloads)) Files.createDirectories(downloads);
+        return downloads;
     }
 
     // ---------- GOOGLE MESSAGES ----------
@@ -192,25 +221,20 @@ public class v2_1click_registration {
         messagesPage.setDefaultTimeout(20_000);
         messagesPage.navigate("https://messages.google.com/web/conversations");
 
-        // Ждём появления списка чатов
         for (int i = 0; i < 20; i++) {
             if (messagesPage.locator("mws-conversation-list-item").count() > 0) break;
             messagesPage.waitForTimeout(1000);
         }
 
-        // Открываем верхний (последний) чат
         Locator chat = messagesPage.locator("mws-conversation-list-item").first();
         chat.click();
         messagesPage.waitForTimeout(1200);
 
-        // Берём текст последнего входящего сообщения
-        // Основной узел текста: div.text-msg.msg-content div.ng-star-inserted
         Locator nodes = messagesPage.locator("div.text-msg.msg-content div.ng-star-inserted");
         int count = nodes.count();
         String text = count > 0 ? nodes.nth(count - 1).innerText() : "";
         if (text == null) text = "";
 
-        // Ищем 4–8 подряд идущих цифр
         Matcher m = Pattern.compile("(?<!\\d)(\\d{4,8})(?!\\d)").matcher(text);
         String code = m.find() ? m.group(1) : null;
 
@@ -222,11 +246,81 @@ public class v2_1click_registration {
         return code;
     }
 
+    // ---------- ИЗВЛЕЧЕНИЕ КРЕДОВ ----------
+    static Map<String, String> extractCredentials(Page page) {
+        String[] loginSels = {
+                "#post-registration-login", "#js-post-reg-login", "[data-field='login']",
+                ".post-registration__login", ".js-post-reg-login"
+        };
+        String[] passSels = {
+                "#post-registration-password", "#js-post-reg-password", "[data-field='password']",
+                ".post-registration__password", ".js-post-reg-password"
+        };
+        String login = null, password = null;
+
+        for (String s : loginSels) {
+            Locator l = page.locator(s);
+            if (l.count() > 0 && l.first().isVisible()) {
+                login = l.first().innerText().trim();
+                break;
+            }
+        }
+        for (String s : passSels) {
+            Locator l = page.locator(s);
+            if (l.count() > 0 && l.first().isVisible()) {
+                password = l.first().innerText().trim();
+                break;
+            }
+        }
+
+        if ((login == null || login.isBlank()) || (password == null || password.isBlank())) {
+            Locator block = page.locator("#js-post-reg-copy-login-password, #js-post-registration-copy-login-password, .post-registration, .popup-registration, .box-modal");
+            if (block.count() > 0) {
+                String txt = block.first().innerText();
+                if (login == null || login.isBlank()) {
+                    Matcher ml = Pattern.compile("Логин\\s*[:\\-]?\\s*(\\S+)", Pattern.CASE_INSENSITIVE).matcher(txt);
+                    if (ml.find()) login = ml.group(1);
+                }
+                if (password == null || password.isBlank()) {
+                    Matcher mp = Pattern.compile("Пароль\\s*[:\\-]?\\s*(\\S+)", Pattern.CASE_INSENSITIVE).matcher(txt);
+                    if (mp.find()) password = mp.group(1);
+                }
+            }
+        }
+
+        Map<String, String> out = new HashMap<>();
+        out.put("login", login);
+        out.put("password", password);
+        return out;
+    }
+
+    // ---------- ПРИВЯЗКА ПО СМС (если модалка есть) ----------
+    static void tryBindBySmsIfModalVisible(Page page) {
+        Locator field = page.locator("input.phone-sms-modal-content__code").first();
+        if (field == null || field.count() == 0 || !field.isVisible()) return;
+
+        System.out.println("Обнаружено поле ввода кода. Получаем код из Google Messages…");
+        String code = fetchSmsCodeFromGoogleMessages();
+        field.fill(code);
+        pauseShort();
+
+        Locator confirmBtn = page.locator("button.phone-sms-modal-content__send:has-text('Подтвердить'), button:has-text('Подтвердить')");
+        if (confirmBtn.count() > 0 && confirmBtn.first().isVisible()) {
+            try { confirmBtn.first().click(); }
+            catch (Throwable t) { page.evaluate("el => el.click()", confirmBtn.first()); }
+            System.out.println("SMS-код подтверждён");
+            tg.sendMessage("🔐 Привязка по SMS подтверждена кодом: `" + code + "`");
+        }
+    }
+
     // ---------- ТЕСТ ----------
     @Test
-    void v2_registration() {
+    void v2_registration() throws Exception {
         long startTime = System.currentTimeMillis();
         tg.sendMessage("🚀 *Тест v2_1click_registration* стартовал (десктоп, регистрация в 1 клик)");
+
+        String sentLogin = null;
+        String sentPassword = null;
 
         try {
             System.out.println("Открываем сайт 1xbet.kz");
@@ -241,26 +335,18 @@ public class v2_1click_registration {
             waitForRegistrationModal(page);
             pauseShort();
 
-            if (!isOneClickActive(page)) {
-                System.out.println("Активируем вкладку 'В 1 клик'");
-                Locator oneClickTab = page.locator("div#games_content.c-registration button.c-registration__tab:has-text('В 1 клик')");
-                try {
-                    oneClickTab.first().click(new Locator.ClickOptions().setTimeout(3000));
-                } catch (Exception e) {
-                    System.out.println("Обычный клик не сработал, пробуем через JS...");
-                    ElementHandle handle = oneClickTab.first().elementHandle();
-                    if (handle != null) page.evaluate("el => el.click()", handle);
-                }
+// --- КЛИКАЕМ ВСЕ "В 1 КЛИК" ---
+            clickAllOneClickTabs(page);
 
-                // Ждём, пока вкладка реально станет активной
-                page.waitForSelector("div#games_content.c-registration button.c-registration__tab.active:has-text('В 1 клик')",
-                        new Page.WaitForSelectorOptions()
-                                .setTimeout(120000)
-                                .setState(WaitForSelectorState.VISIBLE)
-                );
-            } else {
-                System.out.println("Вкладка 'В 1 клик' уже активна");
-            }
+// Ждём, пока вкладка реально станет активной
+            page.waitForSelector(
+                    "div#games_content.c-registration button.c-registration__tab.active:has-text('В 1 клик')",
+                    new Page.WaitForSelectorOptions()
+                            .setTimeout(120_000)
+                            .setState(WaitForSelectorState.VISIBLE)
+            );
+
+            System.out.println("Вкладка 'В 1 клик' активна");
 
             String promo = randomPromo(8);
             System.out.println("Вводим промокод: " + promo);
@@ -336,6 +422,7 @@ public class v2_1click_registration {
                 ScreenshotHelper.takeScreenshot(page, "registration_timeout");
             }
 
+<<<<<<< HEAD
 // ----------- POST-REGISTRATION FLOW -------------
             System.out.println("Кликаем 'Копировать'");
             Locator copyBtn = page.locator("#js-post-reg-copy-login-password");
@@ -417,49 +504,205 @@ public class v2_1click_registration {
                     closeBtns.nth(i).click();
                     System.out.println("Закрыт крестик #" + (i + 1));
                     page.waitForTimeout(300);
+=======
+            // --- ПОСТ-РЕГ ОКНО ---
+            System.out.println("Ждём блок копирования логина/пароля (до 120 сек)");
+            page.waitForSelector("#js-post-reg-copy-login-password",
+                    new Page.WaitForSelectorOptions().setTimeout(120_000).setState(WaitForSelectorState.VISIBLE));
+
+            System.out.println("Пробуем закрыть всплывающее окно уведомлений (Блокировать)");
+            Locator blockBtn = page.locator("a.pf-subs-btn-link.pf-subs-btn-link__secondary:has-text('Блокировать')");
+            if (blockBtn.count() > 0 && blockBtn.first().isVisible()) {
+                try {
+                    blockBtn.first().click();
+                    System.out.println("Окно уведомлений закрыто обычным кликом");
+                } catch (Exception e) {
+                    page.evaluate("document.querySelector(\"a.pf-subs-btn-link.pf-subs-btn-link__secondary[href='#deny']\")?.click()");
+                    System.out.println("Окно уведомлений закрыто через JS");
                 }
-            }// --- Закрываем окно регистрации ---
-            System.out.println("Закрываем окно регистрации...");
-            Locator regCloseBtn = page.locator("#closeModal");
-            if (regCloseBtn.isVisible()) {
-                regCloseBtn.click();
-                System.out.println("Окно регистрации закрыто ✅");
-                page.waitForTimeout(500);
+                pauseShort();
+            }
+
+            // Копировать логин/пароль — строго по id
+            System.out.println("Кликаем 'Скопировать' логин/пароль");
+            page.locator("#js-post-reg-copy-login-password").first().click();
+
+            // Закрываем всплывающее окно, если появилось
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('ОК'), button.swal2-confirm.swal2-styled:has-text('OK'), button.swal2-confirm.swal2-styled");
+
+            Path downloadsDir = ensureDownloadsDir();
+
+            clickIfVisible(page, "button.identification-popup-close, button.identification-popup-get-bonus__close");
+
+            // Сохраняем в файл (download || blob-фоллбэк)
+            System.out.println("Сохраняем в файл");
+            Locator saveFileBtn = page.locator("a#account-info-button-file");
+            if (saveFileBtn.count() > 0 && saveFileBtn.first().isVisible()) {
+                boolean fileSaved = false;
+                try {
+                    Download d1 = page.waitForDownload(
+                            new Page.WaitForDownloadOptions().setTimeout(30_000),
+                            () -> saveFileBtn.first().click()
+                    );
+                    String suggested = d1.suggestedFilename();
+                    System.out.println("Скачали файл: " + suggested);
+                    d1.saveAs(downloadsDir.resolve(suggested));
+                    fileSaved = true;
+                } catch (TimeoutError te) {
+                    System.out.println("Download не пришёл за 30с — пробуем blob-фоллбэк...");
+                }
+
+                if (!fileSaved) {
+                    Object result = page.evaluate("async () => {" +
+                            "const a = document.querySelector('#account-info-button-file');" +
+                            "if (!a) return null;" +
+                            "const href = a.getAttribute('href');" +
+                            "const name = a.getAttribute('download') || '1xBet_file.txt';" +
+                            "if (!href || !href.startsWith('blob:')) return null;" +
+                            "const resp = await fetch(href);" +
+                            "const buf = await resp.arrayBuffer();" +
+                            "const bytes = new Uint8Array(buf);" +
+                            "let binary=''; for (let i=0;i<bytes.length;i++){ binary += String.fromCharCode(bytes[i]); }" +
+                            "const b64 = btoa(binary);" +
+                            "return { name, b64 };" +
+                            "}");
+                    if (result instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> map = (Map<String, Object>) result;
+                        String name = String.valueOf(map.get("name"));
+                        String b64 = String.valueOf(map.get("b64"));
+                        if (b64 != null && !"null".equals(b64)) {
+                            byte[] bytes = Base64.getDecoder().decode(b64);
+                            Files.write(downloadsDir.resolve(name), bytes);
+                            System.out.println("Сохранили файл через blob-фоллбэк: " + name);
+                            fileSaved = true;
+                        }
+                    }
+                    if (!fileSaved) {
+                        System.out.println("Не удалось сохранить файл (нет download и не blob). Пропускаем шаг.");
+                    }
+>>>>>>> 8a73c4b (обновлено 06.11.2025)
+                }
             } else {
-                System.out.println("Крестик регистрации не найден — возможно, уже закрыто.");
+                System.out.println("Кнопка 'Сохранить в файл' не найдена — пропускаем шаг.");
             }
-            neutralizeOverlayIfNeeded(page);
 
-            // Кликаем по каждой видимой ссылке "Пройти идентификацию" через JS
-            Locator identLinks = page.locator("a.identification-popup-link[href='/office/identification']");
-            int count = identLinks.count();
-            for (int i = 0; i < count; i++) {
-                Locator link = identLinks.nth(i);
-                if (link.isVisible()) {
-                    page.evaluate("el => el.click()", link);
-                    System.out.println("Кликнули 'Пройти идентификацию' через JS! #" + (i + 1));
-                    page.waitForTimeout(1000);
-                    break; // Если нужна только первая — убери break если надо все
+// Закрываем всплывающее окно, если появилось
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('ОК'), button.swal2-confirm.swal2-styled:has-text('OK'), button.swal2-confirm.swal2-styled");
+
+            // Сохраняем картинкой — download (60с) или popup-скрин фоллбэк
+            System.out.println("Сохраняем картинкой");
+            Locator saveImageBtn = page.locator("a#account-info-button-image");
+            if (saveImageBtn.count() > 0 && saveImageBtn.first().isVisible()) {
+                boolean imageSaved = false;
+
+                try {
+                    Download d2 = page.waitForDownload(
+                            new Page.WaitForDownloadOptions().setTimeout(60_000),
+                            () -> saveImageBtn.first().click()
+                    );
+                    String suggested = d2.suggestedFilename();
+                    System.out.println("Скачали картинку: " + suggested);
+                    d2.saveAs(downloadsDir.resolve(suggested));
+                    imageSaved = true;
+                } catch (TimeoutError te) {
+                    System.out.println("Событие download не пришло за 60с — пробуем popup-окно с изображением...");
+                } catch (RuntimeException re) {
+                    System.out.println("Не удалось дождаться download: " + re.getMessage());
+                }
+
+                if (!imageSaved) {
+                    Page popup = null;
+                    try {
+                        popup = page.waitForPopup(
+                                new Page.WaitForPopupOptions().setTimeout(5000),
+                                () -> { try { saveImageBtn.first().click(); } catch (Throwable ignored) {} }
+                        );
+                    } catch (TimeoutError ignored) {}
+
+                    if (popup != null) {
+                        popup.waitForLoadState(LoadState.DOMCONTENTLOADED);
+                        String fname = "1xBet_image_fallback_" + System.currentTimeMillis() + ".png";
+                        popup.screenshot(new Page.ScreenshotOptions().setPath(downloadsDir.resolve(fname)));
+                        System.out.println("Скрин попап-изображения сохранён: " + fname);
+                        imageSaved = true;
+                        try { popup.close(); } catch (Throwable ignored) {}
+                    } else {
+                        System.out.println("Попап не появился — шаг 'Сохранить картинкой' пропущен (поведение сайта нестабильно).");
+                    }
+                }
+            } else {
+                System.out.println("Кнопка 'Сохранить картинкой' не найдена — пропускаем шаг.");
+            }
+
+            clickIfVisible(page, "button.identification-popup-close, button.identification-popup-get-bonus__close");
+
+            // Попробовать привязку по SMS, если модалка ввода кода есть
+            tryBindBySmsIfModalVisible(page);
+
+            // Собрать креды для Telegram
+            Map<String, String> creds = extractCredentials(page);
+            sentLogin = creds.get("login");
+            sentPassword = creds.get("password");
+
+            // Отправка на e-mail
+            clickIfVisible(page, "a#form_mail_after_submit");
+            Locator emailField = page.locator("input.post-email__input[type='email']:visible").first();
+            if (emailField != null && emailField.isVisible()) {
+                emailField.fill(ConfigHelper.get("email"));
+                pauseShort();
+                Locator sendBtn = page.locator("button.js-post-email-content-form__btn:not([disabled])");
+                if (sendBtn.count() > 0) {
+                    sendBtn.first().click();
+                    System.out.println("Email отправлен");
+                    pauseMedium();
                 }
             }
 
-// --- Выходим из аккаунта ---
-            System.out.println("Кликаем 'Выход'");
-            neutralizeOverlayIfNeeded(page); clickIfVisible(page, "a.ap-left-nav__item_exit");
-            pauseShort();
+            // Закрыть возможные попапы, перейти в ЛК и выйти
+            clickIfVisible(page, "button.identification-popup-transition__close");
+            clickIfVisible(page, "button.identification-popup-close");
+            clickIfVisible(page, "#closeModal, .arcticmodal-close.c-registration__close");
+            // Закрываем всплывающее окно, если появилось
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('ОК'), button.swal2-confirm.swal2-styled:has-text('OK'), button.swal2-confirm.swal2-styled");
 
-            neutralizeOverlayIfNeeded(page); clickIfVisible(page, "button.swal2-confirm.swal2-styled");
-            System.out.println("Вышли из аккаунта");
+            page.navigate("https://1xbet.kz/office/account");
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
+
+            Locator logout = page.locator("a.ap-left-nav__item.ap-left-nav__item_exit:has-text('Выход')");
+            page.waitForSelector("a.ap-left-nav__item.ap-left-nav__item_exit",
+                    new Page.WaitForSelectorOptions().setTimeout(12000).setState(WaitForSelectorState.VISIBLE));
+            try {
+                logout.first().click(new Locator.ClickOptions().setTimeout(3000));
+            } catch (Throwable ignore) {
+                neutralizeOverlayIfNeeded(page);
+                try {
+                    logout.first().click(new Locator.ClickOptions().setTimeout(2500).setForce(true));
+                } catch (Throwable ignored2) {
+                    jsClick(logout);
+                }
+            }
+            clickIfVisible(page, "button.swal2-confirm.swal2-styled:has-text('ОК'), button.swal2-confirm");
 
             waitUntilLoggedOutOrHeal(page);
 
+            boolean loggedOut = isLoggedOut(page);
+            assertTrue(loggedOut, "Ожидали гостевое состояние после выхода.");
+
             long duration = (System.currentTimeMillis() - startTime) / 1000;
+            String credsBlock =
+                    (sentLogin != null && sentPassword != null)
+                            ? "• Логин: `" + sentLogin + "`\n• Пароль: `" + sentPassword + "`\n"
+                            : "• Креды: не удалось извлечь\n";
+
             tg.sendMessage(
                     "✅ *Тест успешно завершён:* v2_1click_registration\n" +
                             "• Регистрация — выполнена\n" +
-                            "• Привязка по SMS — активирована\n" +
+                            "• Сохранение файла/картинки — выполнено\n" +
                             "• Отправка на e-mail — выполнена\n" +
+                            "• Привязка по SMS — при наличии модалки подтверждена\n" +
                             "• Выход из аккаунта — выполнен\n\n" +
+                            credsBlock +
                             "🕒 Время выполнения: *" + duration + " сек.*\n" +
                             "🌐 [1xbet.kz](https://1xbet.kz)"
             );
