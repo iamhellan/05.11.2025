@@ -1,181 +1,176 @@
 package org.example;
 
 import com.microsoft.playwright.*;
-import org.junit.jupiter.api.Test;
 import com.microsoft.playwright.options.*;
-import java.util.regex.Pattern;
+import org.junit.jupiter.api.*;
 
+import java.text.SimpleDateFormat;
+import java.util.*;
 import java.nio.file.Paths;
-import java.util.List;
 
 public class v2_promo {
-    @Test
-    void openBonusesOneByOneAndScrollWithLanguageSwitch() {
-        try (Playwright playwright = Playwright.create()) {
-            // --- Запускаем браузер максимально удобно для дебага
-            Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
-                    .setHeadless(false)
-                    .setArgs(List.of("--start-maximized")));
-            BrowserContext context = browser.newContext(new Browser.NewContextOptions().setViewportSize(null));
-            Page mainPage = context.newPage();
+    static Playwright playwright;
+    static Browser browser;
+    static BrowserContext context;
+    static Page mainPage;
+    static TelegramNotifier tg;
 
-            // 1. Открываем сайт
-            mainPage.navigate("https://1xbet.kz/?whn=mobile&platform_type=desktop");
+    private final String screenshotsFolder = "C:\\Users\\b.zhantemirov\\IdeaProjects\\1XBONUS";
+    private final List<String> promoNames = new ArrayList<>();
+
+    @BeforeAll
+    static void setUpAll() {
+        playwright = Playwright.create();
+        browser = playwright.chromium().launch(
+                new BrowserType.LaunchOptions()
+                        .setHeadless(false)
+                        .setArgs(List.of("--start-maximized"))
+        );
+        context = browser.newContext(new Browser.NewContextOptions().setViewportSize(null));
+        mainPage = context.newPage();
+        mainPage.setDefaultTimeout(30_000);
+
+        // --- Telegram ---
+        String botToken = ConfigHelper.get("telegram.bot.token");
+        String chatId = ConfigHelper.get("telegram.chat.id");
+        tg = new TelegramNotifier(botToken, chatId);
+    }
+
+    @Test
+    void openBonusesAndTakeScreenshotsInAllLanguages() {
+        long startTime = System.currentTimeMillis();
+
+        // --- Telegram уведомление о старте ---
+        tg.sendMessage(
+                "🚀 *Старт*: v2\\_promo (десктоп, раздел 1XBONUS)\n"
+                        + "• Время: *" + new SimpleDateFormat("HH:mm:ss").format(new Date()) + "*\n"
+                        + "• Сайт: [1xbet\\.kz](https://1xbet.kz)\n"
+                        + "_Проверка всех доступных акций и создание скриншотов..._"
+        );
+
+        try {
+            mainPage.navigate("https://1xbet.kz/");
+            mainPage.waitForLoadState(LoadState.DOMCONTENTLOADED);
+            mainPage.waitForTimeout(2000);
             System.out.println("Открыли https://1xbet.kz/");
 
-            // 2. Переходим в раздел "1xBONUS"
+            // --- Раздел 1XBONUS ---
             mainPage.waitForSelector("a[href='bonus/rules']");
             mainPage.click("a[href='bonus/rules']");
-            mainPage.waitForLoadState(LoadState.DOMCONTENTLOADED);
-            mainPage.waitForTimeout(1500);
+            mainPage.waitForTimeout(1000);
 
-// 3. Переходим во вкладку "Все бонусы"
+            // --- Кликаем "Все бонусы" ---
+            Locator allBonusesBtn = mainPage.locator("button.bonus-navigation-tabs-item-link:has-text('Все бонусы')");
             try {
-                Locator allBonusesButton = mainPage.locator("button.bonus-navigation-tabs-item-link:has-text('Все бонусы')");
-                allBonusesButton.waitFor(new Locator.WaitForOptions().setTimeout(10000).setState(WaitForSelectorState.VISIBLE));
-                allBonusesButton.click();
-                System.out.println("Открыли вкладку 'Все бонусы' ✅");
+                allBonusesBtn.waitFor(new Locator.WaitForOptions().setTimeout(5000).setState(WaitForSelectorState.VISIBLE));
+                allBonusesBtn.click();
             } catch (Exception e) {
-                System.out.println("❗ Не удалось открыть 'Все бонусы': " + e.getMessage());
-                mainPage.screenshot(new Page.ScreenshotOptions().setPath(Paths.get("error_all_bonuses.png")));
+                mainPage.evaluate("Array.from(document.querySelectorAll('button.bonus-navigation-tabs-item-link'))"
+                        + ".find(el => el.textContent.includes('Все бонусы'))?.click()");
             }
 
-            // 4. Ждём список бонусов
+            // --- Список акций ---
             mainPage.waitForSelector("ul.bonuses-list");
             List<ElementHandle> bonusLinks = mainPage.querySelectorAll("ul.bonuses-list a.bonus-tile");
-            if (bonusLinks.isEmpty()) {
-                throw new RuntimeException("Не найдено ни одной бонусной акции!");
-            }
-            System.out.println("Нашли бонусов: " + bonusLinks.size());
+            if (bonusLinks.isEmpty()) throw new RuntimeException("❌ Не найдено ни одной акции!");
 
-            // 5. Проходим по каждой акции по одной вкладке
+            Locator bonusTitles = mainPage.locator("a.bonus-tile .bonus-tile-content__name div");
+            for (int i = 0; i < bonusTitles.count(); i++) {
+                try {
+                    promoNames.add(bonusTitles.nth(i).innerText().trim());
+                } catch (Exception ignored) {}
+            }
+
+            System.out.println("Найдено акций: " + promoNames.size());
+
+            // --- Перебор акций ---
             for (int i = 0; i < bonusLinks.size(); i++) {
                 String href = bonusLinks.get(i).getAttribute("href");
                 String url = href.startsWith("http") ? href : "https://1xbet.kz" + href;
-                System.out.println("=== Переходим к акции #" + (i + 1) + ": " + url);
+                String promoName = i < promoNames.size() ? promoNames.get(i) : ("Акция #" + (i + 1));
+
+                System.out.println("=== " + promoName + " → " + url);
+
                 Page tab = context.newPage();
                 tab.navigate(url);
-
-                // --- Ожидаем полной загрузки страницы акции (теперь вообще неубиваемо)
                 waitForPageLoaded(tab, url, i + 1);
 
-                // --- Кликаем по контейнеру, в котором расположен iframe ---
-                try {
-                    System.out.println("Кликаем по контейнеру с iframe (default-layout-container__inner)...");
-
-                    Locator container = tab.locator("div.default-layout-container__inner");
-                    container.waitFor(new Locator.WaitForOptions()
-                            .setTimeout(10000)
-                            .setState(WaitForSelectorState.VISIBLE));
-
-                    BoundingBox box = container.boundingBox();
-                    if (box != null) {
-                        tab.mouse().click(box.x + box.width / 2, box.y + box.height / 2);
-                        System.out.println("Клик по контейнеру выполнен ✅");
-                    } else {
-                        // fallback: если координаты не доступны, кликаем через JS
-                        System.out.println("Клик по координатам не удался, пробуем через JS");
-                        tab.evaluate("document.querySelector('div.default-layout-container__inner')?.click()");
-                    }
-
-                    tab.waitForTimeout(800); // короткая пауза после клика
-
-                } catch (Exception e) {
-                    System.out.println("❗ Не удалось кликнуть по контейнеру: " + e.getMessage());
-                }
-
-                // 1. Скролл вниз и вверх на русском
-                slowScrollDown(tab, 60, 100);
-                slowScrollUp(tab, 60, 100);
-
-                // 2. Смена языка: ru → kz
+                takeScreenshot(tab, promoName, "ru");
                 switchLanguage(tab, "kz");
                 waitForPageLoaded(tab, url, i + 1);
-                slowScrollDown(tab, 60, 100);
-                slowScrollUp(tab, 60, 100);
-
-                // 3. Смена языка: kz → en
+                takeScreenshot(tab, promoName, "kz");
                 switchLanguage(tab, "en");
                 waitForPageLoaded(tab, url, i + 1);
-                slowScrollDown(tab, 60, 100);
-                slowScrollUp(tab, 60, 100);
+                takeScreenshot(tab, promoName, "en");
 
-                // 4. Закрываем вкладку
                 tab.close();
                 mainPage.bringToFront();
-                mainPage.waitForTimeout(500);
+                mainPage.waitForTimeout(700);
             }
 
-            System.out.println("Все акции пройдены поочередно ✅");
-            mainPage.waitForTimeout(1500);
+            // --- Telegram отчёт ---
+            long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+            StringBuilder report = new StringBuilder();
+            report.append("✅ *Успешно завершено*: v2\\_promo\n")
+                    .append("• Проверено акций: *").append(promoNames.size()).append("*\n\n")
+                    .append("📋 *Список акций:*\n");
+            for (String name : promoNames) {
+                report.append("• ").append(name.replace("-", "\\-")).append("\n");
+            }
+            report.append("\n📂 *Скриншоты сохранены в:*\n`")
+                    .append(screenshotsFolder.replace("\\", "\\\\")).append("`\n")
+                    .append("🕒 *Время выполнения:* ").append(elapsed).append(" сек.\n")
+                    .append("🌐 [1xbet\\.kz](https://1xbet.kz)");
+
+            tg.sendMessage(report.toString());
+
+        } catch (Exception e) {
+            tg.sendMessage("❌ *Ошибка в v2\\_promo*: `" + e.getMessage().replace("_", "\\_") + "`");
+            e.printStackTrace();
         }
     }
 
-    // --- Ожидание полной загрузки страницы, теперь супер-надёжно
     private void waitForPageLoaded(Page page, String url, int bonusIndex) {
         try {
-            // Ждём только построения DOM — DOMCONTENTLOADED
-            page.waitForLoadState(LoadState.DOMCONTENTLOADED, new Page.WaitForLoadStateOptions().setTimeout(10000));
-        } catch (PlaywrightException e) {
-            System.out.println("❗ [WARNING] DOM не загрузился за 10 сек на акции #" + bonusIndex + ": " + url);
-        }
-
-        try {
-            // Ждём появления ключевого блока
-            page.waitForSelector(".bonus-detail, .promo-detail, .bonus-header",
-                    new Page.WaitForSelectorOptions().setTimeout(12000).setState(WaitForSelectorState.VISIBLE));
-        } catch (PlaywrightException e) {
-            System.out.println("❗ [WARNING] Не найден ключевой блок на акции #" + bonusIndex + ": " + url + "\nПричина: " + e.getMessage());
-        }
-        page.waitForTimeout(800); // Минимальная пауза после загрузки
-    }
-
-    // --- Медленный скролл вниз
-    private void slowScrollDown(Page page, int steps, int pauseMs) {
-        System.out.println("Скроллим вниз...");
-        for (int i = 0; i <= steps; i++) {
-            double percent = i * 1.0 / steps;
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight * " + percent + ");");
-            page.waitForTimeout(pauseMs);
-        }
-        page.waitForTimeout(500);
-    }
-
-    // --- Медленный скролл вверх
-    private void slowScrollUp(Page page, int steps, int pauseMs) {
-        System.out.println("Скроллим вверх...");
-        for (int i = steps; i >= 0; i--) {
-            double percent = i * 1.0 / steps;
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight * " + percent + ");");
-            page.waitForTimeout(pauseMs);
-        }
-        page.waitForTimeout(500);
-    }
-
-    // --- Переключение языка на вкладке: ru, kz, en
-    private void switchLanguage(Page page, String lang) {
-        System.out.println("Меняем язык на: " + lang);
-        try {
-            page.waitForSelector("button.header-lang__btn", new Page.WaitForSelectorOptions().setTimeout(3000));
-            page.click("button.header-lang__btn");
-            String langSelector;
-            switch (lang) {
-                case "kz":
-                    langSelector = "a.header-lang-list-item-link[data-lng='kz']";
-                    break;
-                case "en":
-                    langSelector = "a.header-lang-list-item-link[data-lng='en']";
-                    break;
-                case "ru":
-                default:
-                    langSelector = "a.header-lang-list-item-link[data-lng='ru']";
-                    break;
-            }
-            page.waitForSelector(langSelector, new Page.WaitForSelectorOptions().setTimeout(3000));
-            page.click(langSelector);
-            page.waitForTimeout(1800); // Ждём смены языка
+            page.waitForLoadState(LoadState.NETWORKIDLE, new Page.WaitForLoadStateOptions().setTimeout(15000));
+            page.waitForSelector("header, footer, .bonus-detail, .promo-detail",
+                    new Page.WaitForSelectorOptions().setTimeout(10000).setState(WaitForSelectorState.VISIBLE));
+            page.waitForTimeout(1000);
+            System.out.println("✅ Страница #" + bonusIndex + " загружена: " + url);
         } catch (Exception e) {
-            System.out.println("Не удалось переключить язык на " + lang + ": " + e.getMessage());
+            System.out.println("⚠ Ошибка загрузки #" + bonusIndex + ": " + url);
         }
+    }
+
+    private void takeScreenshot(Page page, String promoName, String lang) {
+        try {
+            String safeName = promoName.replaceAll("[^a-zA-Z0-9а-яА-Я\\s]", "").replace(" ", "_");
+            String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            String filename = String.format("%s\\%s_%s_%s.png", screenshotsFolder, safeName, lang, timestamp);
+            page.screenshot(new Page.ScreenshotOptions().setPath(Paths.get(filename)).setFullPage(true));
+            System.out.println("📸 Скриншот сохранён: " + filename);
+        } catch (Exception e) {
+            System.out.println("Ошибка скриншота: " + e.getMessage());
+        }
+    }
+
+    private void switchLanguage(Page page, String lang) {
+        try {
+            page.evaluate("document.querySelectorAll('.vfm').forEach(el => el.remove());");
+            page.waitForTimeout(800);
+            page.click("button.header-lang__btn");
+            String selector = "a.header-lang-list-item-link[data-lng='" + lang + "']";
+            page.click(selector);
+            page.waitForLoadState(LoadState.NETWORKIDLE);
+            page.waitForTimeout(1200);
+            System.out.println("🔁 Язык переключён: " + lang);
+        } catch (Exception e) {
+            System.out.println("⚠ Не удалось сменить язык: " + e.getMessage());
+        }
+    }
+
+    @AfterAll
+    static void tearDownAll() {
+        System.out.println("Тест завершён ✅ (браузер остаётся открытым)");
     }
 }
