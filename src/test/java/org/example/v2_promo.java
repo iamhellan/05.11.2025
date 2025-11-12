@@ -15,7 +15,7 @@ public class v2_promo {
     static Page mainPage;
     static TelegramNotifier tg;
 
-    private final String screenshotsFolder = "C:\\Users\\b.zhantemirov\\IdeaProjects\\1XBONUS";
+    private final String screenshotsFolder = "C:\\Users\\zhntm\\IdeaProjects\\11.11.2025\\1XBONUS";
     private final List<String> promoNames = new ArrayList<>();
 
     @BeforeAll
